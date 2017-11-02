@@ -78,11 +78,11 @@ var _ = Describe("ApplicationRepo", func() {
 		})
 	})
 
-	Describe("DoesAppExist", func() {
+	Describe("GetAppMetadata", func() {
 
 		It("returns an error if the cli returns an error", func() {
 			cliConn.CliCommandWithoutTerminalOutputReturns([]string{}, errors.New("you shall not curl"))
-			_, err := repo.DoesAppExist("app-name")
+			_, err := repo.GetAppMetadata("app-name")
 
 			Expect(err).To(MatchError("you shall not curl"))
 		})
@@ -93,36 +93,14 @@ var _ = Describe("ApplicationRepo", func() {
 			}
 
 			cliConn.CliCommandWithoutTerminalOutputReturns(response, nil)
-			_, err := repo.DoesAppExist("app-name")
+			_, err := repo.GetAppMetadata("app-name")
 
 			Expect(err).To(HaveOccurred())
 		})
 
-		It("returns an error if the cli response doesn't contain total_results", func() {
+		It("returns app data if the app exists", func() {
 			response := []string{
-				`{"brutal_results":2}`,
-			}
-
-			cliConn.CliCommandWithoutTerminalOutputReturns(response, nil)
-			_, err := repo.DoesAppExist("app-name")
-
-			Expect(err).To(MatchError("Missing total_results from api response"))
-		})
-
-		It("returns an error if the cli response contains a non-number total_results", func() {
-			response := []string{
-				`{"total_results":"sandwich"}`,
-			}
-
-			cliConn.CliCommandWithoutTerminalOutputReturns(response, nil)
-			_, err := repo.DoesAppExist("app-name")
-
-			Expect(err).To(MatchError("total_results didn't have a number sandwich"))
-		})
-
-		It("returns true if the app exists", func() {
-			response := []string{
-				`{"total_results":1}`,
+				`{"resources":[{"entity":{"state":"STARTED"}}]}`,
 			}
 			spaceGUID := "4"
 
@@ -136,19 +114,19 @@ var _ = Describe("ApplicationRepo", func() {
 				nil,
 			)
 
-			result, err := repo.DoesAppExist("app-name")
+			result, err := repo.GetAppMetadata("app-name")
 
 			Expect(cliConn.CliCommandWithoutTerminalOutputCallCount()).To(Equal(1))
 			args := cliConn.CliCommandWithoutTerminalOutputArgsForCall(0)
 			Expect(args).To(Equal([]string{"curl", "v2/apps?q=name:app-name&q=space_guid:4"}))
 
 			Expect(err).ToNot(HaveOccurred())
-			Expect(result).To(BeTrue())
+			Expect(result).ToNot(BeNil())
 		})
 
 		It("URL encodes the application name", func() {
 			response := []string{
-				`{"total_results":1}`,
+				`{"resources":[{"entity":{"state":"STARTED"}}]}`,
 			}
 			spaceGUID := "4"
 
@@ -162,26 +140,26 @@ var _ = Describe("ApplicationRepo", func() {
 				nil,
 			)
 
-			result, err := repo.DoesAppExist("app name")
+			result, err := repo.GetAppMetadata("app name")
 
 			Expect(cliConn.CliCommandWithoutTerminalOutputCallCount()).To(Equal(1))
 			args := cliConn.CliCommandWithoutTerminalOutputArgsForCall(0)
 			Expect(args).To(Equal([]string{"curl", "v2/apps?q=name:app+name&q=space_guid:4"}))
 
 			Expect(err).ToNot(HaveOccurred())
-			Expect(result).To(BeTrue())
+			Expect(result).ToNot(BeNil())
 		})
 
-		It("returns false if the app does not exist", func() {
+		It("returns nil if the app does not exist", func() {
 			response := []string{
-				`{"total_results":0}`,
+				`{"resources":[]}`,
 			}
 
 			cliConn.CliCommandWithoutTerminalOutputReturns(response, nil)
-			result, err := repo.DoesAppExist("app-name")
+			result, err := repo.GetAppMetadata("app-name")
 
-			Expect(err).ToNot(HaveOccurred())
-			Expect(result).To(BeFalse())
+			Expect(err).To(Equal(ErrAppNotFound))
+			Expect(result).To(BeNil())
 		})
 
 	})

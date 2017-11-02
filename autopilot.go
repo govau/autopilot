@@ -35,12 +35,63 @@ func venerableAppName(appName string) string {
 	return fmt.Sprintf("%s-venerable", appName)
 }
 
-func getActionsForExistingApp(appRepo *ApplicationRepo, appName, manifestPath, appPath string, showLogs bool) []rewind.Action {
+func getActionsForApp(appRepo *ApplicationRepo, appName, manifestPath, appPath string, showLogs bool) []rewind.Action {
+	venName := venerableAppName(appName)
+	var err error
+	var curApp, venApp *AppEntity
+	var haveVenToCleanup bool
+
 	return []rewind.Action{
-		// rename
+		// get info about current app
 		{
 			Forward: func() error {
-				return appRepo.RenameApplication(appName, venerableAppName(appName))
+				curApp, err = appRepo.GetAppMetadata(appName)
+				if err != ErrAppNotFound {
+					return err
+				}
+				curApp = nil
+				return nil
+			},
+		},
+		// get info about ven app
+		{
+			Forward: func() error {
+				venApp, err = appRepo.GetAppMetadata(venName)
+				if err != ErrAppNotFound {
+					return err
+				}
+				venApp = nil
+				return nil
+			},
+		},
+		// rename any existing app such so that next step can push to a clear space
+		{
+			Forward: func() error {
+				// Unless otherwise specified, go with our start state
+				haveVenToCleanup = (venApp != nil)
+
+				// If there is no current app running, that's great, we're done here
+				if curApp == nil {
+					return nil
+				}
+
+				// If current app isn't started, then we'll just delete it, and we're done
+				if curApp.State != "STARTED" {
+					return appRepo.DeleteApplication(appName)
+				}
+
+				// Do we have a ven app that will stop a rename?
+				if venApp != nil {
+					// Finally, since the current app claims to be healthy, we'll delete the venerable app, and rename the current over the top
+					err = appRepo.DeleteApplication(venName)
+					if err != nil {
+						return err
+					}
+				}
+
+				// Finally, rename
+				haveVenToCleanup = true
+				return appRepo.RenameApplication(appName, venName)
 			},
 		},
 		// push
@@ -49,17 +100,24 @@ func getActionsForExistingApp(appRepo *ApplicationRepo, appName, manifestPath, a
 				return appRepo.PushApplication(appName, manifestPath, appPath, showLogs)
 			},
 			ReversePrevious: func() error {
+				if !haveVenToCleanup {
+					return nil
+				}
+
 				// If the app cannot start we'll have a lingering application
 				// We delete this application so that the rename can succeed
 				appRepo.DeleteApplication(appName)
 
-				return appRepo.RenameApplication(venerableAppName(appName), appName)
+				return appRepo.RenameApplication(venName, appName)
 			},
 		},
 		// delete
 		{
 			Forward: func() error {
-				return appRepo.DeleteApplication(venerableAppName(appName))
+				if !haveVenToCleanup {
+					return nil
+				}
+				return appRepo.DeleteApplication(venName)
 			},
 		},
 	}
@@ -86,24 +144,10 @@ func (plugin AutopilotPlugin) Run(cliConnection plugin.CliConnection, args []str
 	appName, manifestPath, appPath, showLogs, err := ParseArgs(args)
 	fatalIf(err)
 
-	appExists, err := appRepo.DoesAppExist(appName)
-	fatalIf(err)
-
-	var actionList []rewind.Action
-
-	if appExists {
-		actionList = getActionsForExistingApp(appRepo, appName, manifestPath, appPath, showLogs)
-	} else {
-		actionList = getActionsForNewApp(appRepo, appName, manifestPath, appPath, showLogs)
-	}
-
-	actions := rewind.Actions{
-		Actions:              actionList,
+	fatalIf((&rewind.Actions{
+		Actions:              getActionsForApp(appRepo, appName, manifestPath, appPath, showLogs),
 		RewindFailureMessage: "Oh no. Something's gone wrong. I've tried to roll back but you should check to see if everything is OK.",
-	}
-
-	err = actions.Execute()
-	fatalIf(err)
+	}).Execute())
 
 	fmt.Println()
 	fmt.Println("A new version of your application has successfully been pushed!")
@@ -242,39 +286,44 @@ func (repo *ApplicationRepo) ListApplications() error {
 	return err
 }
 
-func (repo *ApplicationRepo) DoesAppExist(appName string) (bool, error) {
+type AppEntity struct {
+	State string `json:"state"`
+}
+
+var (
+	ErrAppNotFound = errors.New("application not found")
+)
+
+// GetAppMetadata returns metadata about an app with appName
+func (repo *ApplicationRepo) GetAppMetadata(appName string) (*AppEntity, error) {
 	space, err := repo.conn.GetCurrentSpace()
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 
 	path := fmt.Sprintf(`v2/apps?q=name:%s&q=space_guid:%s`, url.QueryEscape(appName), space.Guid)
 	result, err := repo.conn.CliCommandWithoutTerminalOutput("curl", path)
 
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 
 	jsonResp := strings.Join(result, "")
 
-	output := make(map[string]interface{})
+	output := struct {
+		Resources []struct {
+			Entity AppEntity `json:"entity"`
+		} `json:"resources"`
+	}{}
 	err = json.Unmarshal([]byte(jsonResp), &output)
 
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 
-	totalResults, ok := output["total_results"]
-
-	if !ok {
-		return false, errors.New("Missing total_results from api response")
+	if len(output.Resources) == 0 {
+		return nil, ErrAppNotFound
 	}
 
-	count, ok := totalResults.(float64)
-
-	if !ok {
-		return false, fmt.Errorf("total_results didn't have a number %v", totalResults)
-	}
-
-	return count == 1, nil
+	return &output.Resources[0].Entity, nil
 }
